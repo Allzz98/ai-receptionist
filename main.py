@@ -1,18 +1,19 @@
 from flask import Flask, request, Response
 import requests
+import openai
 import os
 
 app = Flask(__name__)
 
-# ElevenLabs setup
-ELEVENLABS_API_KEY = "sk_e79f59ee2c2faf2bbc6e459e1f8ca0fb09958b70f5b4766f"
-ELEVENLABS_VOICE_ID = "EXAVITQu4vr4xnSDxMaL"
+# OpenAI Whisper + GPT setup
+OPENAI_API_KEY = "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"
+openai.api_key = OPENAI_API_KEY
 
 @app.route("/", methods=["GET"])
 def home():
-    return "AI receptionist with ElevenLabs is live"
+    return "AI receptionist with transcription + GPT is running."
 
-# Step 1: Greet the caller and record their message
+# Step 1: Greet the caller and record their voice
 @app.route("/voice", methods=["POST"])
 def voice():
     response = """
@@ -24,52 +25,46 @@ def voice():
     """
     return Response(response, mimetype="text/xml")
 
-# Step 2: Process the recording
+# Step 2: Transcribe the message and respond using ChatGPT
 @app.route("/process", methods=["POST"])
 def process():
-    recording_url = request.form.get("RecordingUrl")
-    print(f"Caller audio: {recording_url}")
+    recording_url = request.form.get("RecordingUrl") + ".mp3"
+    print(f"[Caller Audio] {recording_url}")
 
-    # Use a placeholder reply for now
-    reply_text = "Thanks for calling. We'll get back to you shortly."
+    # Step 1: Download the caller's recording
+    audio = requests.get(recording_url)
+    with open("caller.mp3", "wb") as f:
+        f.write(audio.content)
 
-    # Send reply_text to ElevenLabs and get mp3 audio
-    audio_url = elevenlabs_tts(reply_text)
+    # Step 2: Transcribe using Whisper
+    with open("caller.mp3", "rb") as f:
+        transcript = openai.Audio.transcribe("whisper-1", f)
 
-    # Respond with audio playback
+    caller_text = transcript["text"]
+    print(f"[Caller said] {caller_text}")
+
+    # Step 3: Generate a reply using ChatGPT
+    prompt = f"You are a friendly and professional receptionist. A client just said: '{caller_text}'. How do you respond?"
+    chat_response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are an AI receptionist who helps book appointments and answer questions."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    reply_text = chat_response.choices[0].message.content
+    print(f"[AI Reply] {reply_text}")
+
+    # Step 4: Speak the reply using Twilio Say (ElevenLabs voice comes next)
     response = f"""
     <Response>
-        <Play>{audio_url}</Play>
+        <Say voice="alice">{reply_text}</Say>
         <Pause length="1"/>
         <Say>Goodbye!</Say>
     </Response>
     """
     return Response(response, mimetype="text/xml")
-
-# ElevenLabs text-to-speech
-def elevenlabs_tts(text):
-    headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json"
-    }
-    data = {
-        "text": text,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75
-        }
-    }
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
-    response = requests.post(url, headers=headers, json=data)
-    
-    # Save audio locally
-    audio_path = "response.mp3"
-    with open(audio_path, "wb") as f:
-        f.write(response.content)
-    
-    # Upload to a public location (Render doesn't support this out-of-the-box)
-    # For now, return a dummy hosted MP3 or use Twilio's <Say> fallback
-    return "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
