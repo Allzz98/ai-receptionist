@@ -1,71 +1,90 @@
+
 from flask import Flask, request, Response
-import requests
 import openai
+import requests
+import json
 import os
+import datetime
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 app = Flask(__name__)
 
-# OpenAI Whisper + GPT setup
-OPENAI_API_KEY = "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"
+# Load environment variables
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+GOOGLE_CALENDAR_ID = os.environ.get("GOOGLE_CALENDAR_ID")
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL")
+SERVICE_ACCOUNT_FILE = "service_account.json"
+
 openai.api_key = OPENAI_API_KEY
 
-@app.route("/", methods=["GET"])
-def home():
-    return "AI receptionist with transcription + GPT is running."
+def check_availability(requested_datetime):
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE,
+        scopes=["https://www.googleapis.com/auth/calendar"]
+    )
+    service = build("calendar", "v3", credentials=credentials)
 
-# Step 1: Greet the caller and record their voice
+    start = requested_datetime.isoformat() + 'Z'
+    end = (requested_datetime + datetime.timedelta(hours=1)).isoformat() + 'Z'
+
+    events_result = service.events().list(
+        calendarId=GOOGLE_CALENDAR_ID,
+        timeMin=start,
+        timeMax=end,
+        singleEvents=True,
+        orderBy="startTime"
+    ).execute()
+
+    events = events_result.get("items", [])
+    return len(events) == 0  # True if available
+
+def create_booking(name, description, start_time):
+    credentials = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE,
+        scopes=["https://www.googleapis.com/auth/calendar"]
+    )
+    service = build("calendar", "v3", credentials=credentials)
+
+    event = {
+        'summary': f"Haircut - {name}",
+        'description': description,
+        'start': {'dateTime': start_time.isoformat(), 'timeZone': 'Australia/Sydney'},
+        'end': {'dateTime': (start_time + datetime.timedelta(hours=1)).isoformat(), 'timeZone': 'Australia/Sydney'}
+    }
+
+    created_event = service.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
+    return created_event.get("htmlLink")
+
+def generate_speech(text):
+    response = requests.post(
+        "https://api.elevenlabs.io/v1/text-to-speech/" + ELEVENLABS_VOICE_ID,
+        headers={
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={"text": text, "voice_settings": {"stability": 0.3, "similarity_boost": 0.7}}
+    )
+    with open("static/response.mp3", "wb") as f:
+        f.write(response.content)
+    return "/static/response.mp3"
+
 @app.route("/voice", methods=["POST"])
 def voice():
-    response = """
+    reply = "Welcome to Fresh Fade Barbershop. How can I assist you today?"
+    mp3_path = generate_speech(reply)
+
+    response = f"""<?xml version="1.0" encoding="UTF-8"?>
     <Response>
-        <Say voice="alice">Welcome to Hype Drip Creative Studio. Please tell me how I can help you today after the beep.</Say>
-        <Record action="/process" method="POST" maxLength="10" playBeep="true" />
-        <Say>I didn't catch that. Goodbye!</Say>
+        <Play>https://your-host-url.com{mp3_path}</Play>
     </Response>
-    """
+    """.strip()
     return Response(response, mimetype="text/xml")
 
-# Step 2: Transcribe the message and respond using ChatGPT
-@app.route("/process", methods=["POST"])
-def process():
-    recording_url = request.form.get("RecordingUrl") + ".mp3"
-    print(f"[Caller Audio] {recording_url}")
-
-    # Step 1: Download the caller's recording
-    audio = requests.get(recording_url)
-    with open("caller.mp3", "wb") as f:
-        f.write(audio.content)
-
-    # Step 2: Transcribe using Whisper
-    with open("caller.mp3", "rb") as f:
-        transcript = openai.Audio.transcribe("whisper-1", f)
-
-    caller_text = transcript["text"]
-    print(f"[Caller said] {caller_text}")
-
-    # Step 3: Generate a reply using ChatGPT
-    prompt = f"You are a friendly and professional receptionist. A client just said: '{caller_text}'. How do you respond?"
-    chat_response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are an AI receptionist who helps book appointments and answer questions."},
-            {"role": "user", "content": prompt}
-        ]
-    )
-
-    reply_text = chat_response.choices[0].message.content
-    print(f"[AI Reply] {reply_text}")
-
-    # Step 4: Speak the reply using Twilio Say (ElevenLabs voice comes next)
-    response = f"""
-    <Response>
-        <Say voice="alice">{reply_text}</Say>
-        <Pause length="1"/>
-        <Say>Goodbye!</Say>
-    </Response>
-    """
-    return Response(response, mimetype="text/xml")
+@app.route("/", methods=["GET"])
+def index():
+    return "AI Barbershop Receptionist is online."
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
